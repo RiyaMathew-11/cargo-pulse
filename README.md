@@ -1,12 +1,12 @@
 # cargo-pulse
 
-**Abandonment risk for crates.io packages — explicit signals first, a calibrated two-year probability second.**
+**Abandonment risk for crates.io packages - explicit signals first, a calibrated two-year probability second.**
 
 `cargo-pulse` tells you whether a Rust crate is at risk of becoming abandoned.
 A recorded fact always outranks a forecast: if a crate is already declared
 unmaintained (RustSec) or its repository is archived, the tool reports that and
-stops. Only for a live, undeclared, sufficiently old crate does it run a model —
-a bagged survival (Cox) model over registry and repository signals — and report a
+stops. Only for a live, undeclared, sufficiently old crate does it run a model -
+a bagged survival (Cox) model over registry and repository signals - and report a
 **calibrated probability of abandonment within ~2 years**, with an uncertainty band.
 
 ```
@@ -16,7 +16,7 @@ $ cargo pulse serde
 ✓ repository   github: live
 ✓ scoring      100 bags · percentile 0
 
-✓ LOW RISK — roughly 0–3% chance of abandonment within ~2 years (point 1%)
+✓ LOW RISK - roughly 0–3% chance of abandonment within ~2 years (point 1%)
 ```
 
 ## Install
@@ -43,11 +43,11 @@ repository checks.
 
 ## How it works
 
-1. **crates.io** — does the crate exist? current stats.
-2. **RustSec / OSV** — declared unmaintained? → report and stop.
-3. **Forge** — repository archived or deleted? → report and stop.
-4. **Age gate** — at least 18 months old? otherwise "too young to assess".
-5. **Forecast** — assemble features, score with the bagged Cox ensemble, and
+1. **crates.io** - does the crate exist? current stats.
+2. **RustSec / OSV** - declared unmaintained? → report and stop.
+3. **Forge** - repository archived or deleted? → report and stop.
+4. **Age gate** - at least 18 months old? otherwise "too young to assess".
+5. **Forecast** - assemble features, score with the bagged Cox ensemble, and
    report a registry percentile and a gold-calibrated two-year probability with a
    bootstrap band.
 
