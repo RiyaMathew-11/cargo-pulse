@@ -1,0 +1,30 @@
+{
+ "snapshot": "2026-07-16",
+ "model_T": "2024-07-16",
+ "model_tag": "adv_d2_lr0.03_n200_m20_final",
+ "n_bags": 100,
+ "features": [
+  "log_n_versions",
+  "log_reverse_deps",
+  "log_commits_180d_at_T",
+  "n_owners",
+  "release_cadence_decay",
+  "days_since_owner_change",
+  "months_since_release",
+  "days_since_commit_at_T",
+  "days_since_issue_close_at_T",
+  "days_since_pr_merge_at_T",
+  "is_pre_1_0",
+  "issue_censored",
+  "pr_censored",
+  "has_repo_at"
+ ],
+ "eligibility_months": 18,
+ "horizon": "~2 years",
+ "log1p_features": [
+  "log_n_versions",
+  "log_reverse_deps",
+  "log_commits_180d_at_T"
+ ],
+ "notes": "months_since_release = calendar-month boundary count; cadence gaps over ALL versions incl yanked; is_pre_1_0 = max leading major over all versions == 0; days_since_commit = DEFAULT-BRANCH latest commit (not pushed_at)"
+}
