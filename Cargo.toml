@@ -1,0 +1,24 @@
+[package]
+name = "cargo-pulse"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Abandonment risk for crates.io packages: explicit signals first, a calibrated 2-year probability second"
+authors = ["Riya Prakash Mathew"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/RiyaMathew-11/cargo-pulse"
+readme = "README.md"
+keywords = ["crates", "abandonment", "maintenance", "cargo"]
+categories = ["command-line-utilities", "development-tools::cargo-plugins"]
+include = ["src/**", "data/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE"]
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+csv = "1"
+flate2 = "1"
+indicatif = "0.18.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+termimad = "0.35.1"
+ureq = { version = "2", features = ["json"] }
