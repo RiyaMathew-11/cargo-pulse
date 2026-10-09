@@ -5,7 +5,8 @@
 //!   is_pre_1_0 = max leading major over all versions == 0
 //!   log features = ln(1+x); missing = NaN (trees route via default)
 
-use crate::net::{CrateInfo, RepoStatus};
+use crate::forge::RepoStatus;
+use crate::net::CrateInfo;
 use chrono::{Datelike, NaiveDate};
 
 pub struct FeatureReport {
@@ -65,7 +66,7 @@ pub fn assemble(
     // gone/no-repo crates all serve as has_repo=false with NaN tier)
     let (has_repo, commits_180d, d_commit, d_issue, d_pr, i_cens, p_cens) = match repo {
         RepoStatus::Github { archived: false, last_commit, commits_180d,
-                             last_issue_close, last_pr_merge } => {
+                             last_issue_close, last_pr_merge, .. } => {
             let dc = last_commit.map(|d| (today - d).num_days() as f64).unwrap_or(f64::NAN);
             let di = last_issue_close.map(|d| (today - d).num_days() as f64);
             let dp = last_pr_merge.map(|d| (today - d).num_days() as f64);
