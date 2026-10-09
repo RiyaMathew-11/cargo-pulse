@@ -1,11 +1,6 @@
-//! Live data clients: crates.io, OSV.dev (RustSec advisories), and the
-//! forge APIs (GitHub / GitLab / Codeberg). Serving semantics pinned by
-//! the 12/08 manual pipeline test: days_since_commit reads the DEFAULT
-//! BRANCH commits endpoint (not pushed_at - branch pushes are not
-//! maintainer commits to main), commit counts use the Link-header
-//! trick, and non-GitHub forges get the explicit archived check only
-//! (the model's repo tier was trained on GitHub data alone, so
-//! non-GitHub crates serve as has_repo=false, matching training).
+//! Live registry/advisory clients: crates.io and OSV.dev (RustSec).
+//! The forge clients (GitHub / GitLab / Codeberg) live in forge.rs and
+//! share this module's HTTP agent and date parsing.
 
 use anyhow::{Context, Result, anyhow};
 use chrono::NaiveDate;
@@ -23,7 +18,7 @@ fn agent() -> &'static ureq::Agent {
     })
 }
 
-fn get(url: &str) -> ureq::Request {
+pub(crate) fn get(url: &str) -> ureq::Request {
     agent().get(url).set("User-Agent", UA)
 }
 
@@ -146,158 +141,6 @@ pub fn fetch_advisories(name: &str) -> Result<Vec<Advisory>> {
     Ok(out)
 }
 
-// -------------------------------------------------------------------- forge
-
-pub enum RepoStatus {
-    /// GitHub repo found: archived flag + the model's repo-tier signals.
-    Github {
-        archived: bool,
-        last_commit: Option<NaiveDate>,   // default branch
-        commits_180d: Option<u64>,        // default branch
-        last_issue_close: Option<NaiveDate>,
-        last_pr_merge: Option<NaiveDate>,
-    },
-    /// Non-GitHub forge: explicit archived check only (training's repo
-    /// tier is GitHub-only, so features serve as has_repo=false).
-    OtherForge { forge: String, archived: bool },
-    Gone,          // 404: deleted / renamed / private
-    NoRepo,        // no repository URL in crate metadata
-    Unknown(String),
-}
-
-pub fn check_repo(url: Option<&str>) -> RepoStatus {
-    let Some(url) = url else { return RepoStatus::NoRepo };
-    let path = url
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_end_matches('/')
-        .trim_end_matches(".git");
-    let parts: Vec<&str> = path.split('/').collect();
-    match parts.first().copied() {
-        Some("github.com") if parts.len() >= 3 => github(parts[1], parts[2]),
-        Some("gitlab.com") if parts.len() >= 3 => {
-            let proj = parts[1..].join("%2F");
-            simple_archived(
-                &format!("https://gitlab.com/api/v4/projects/{proj}"),
-                "gitlab.com",
-            )
-        }
-        Some("codeberg.org") if parts.len() >= 3 => simple_archived(
-            &format!("https://codeberg.org/api/v1/repos/{}/{}", parts[1], parts[2]),
-            "codeberg.org",
-        ),
-        Some(host) => RepoStatus::Unknown(host.to_string()),
-        None => RepoStatus::NoRepo,
-    }
-}
-
-fn simple_archived(api_url: &str, forge: &str) -> RepoStatus {
-    match get(api_url).call() {
-        Ok(r) => {
-            let v: serde_json::Value = match r.into_json() {
-                Ok(v) => v,
-                Err(_) => return RepoStatus::Unknown(forge.to_string()),
-            };
-            RepoStatus::OtherForge {
-                forge: forge.to_string(),
-                archived: v["archived"].as_bool().unwrap_or(false),
-            }
-        }
-        Err(ureq::Error::Status(404, _)) => RepoStatus::Gone,
-        Err(_) => RepoStatus::Unknown(forge.to_string()),
-    }
-}
-
-fn gh(url: &str) -> ureq::Request {
-    let mut req = get(url).set("Accept", "application/vnd.github+json");
-    if let Ok(tok) = std::env::var("GITHUB_TOKEN") {
-        req = req.set("Authorization", &format!("Bearer {tok}"));
-    }
-    req
-}
-
-fn github(owner: &str, repo: &str) -> RepoStatus {
-    let base = format!("https://api.github.com/repos/{owner}/{repo}");
-    let v: serde_json::Value = match gh(&base).call() {
-        Ok(r) => match r.into_json() {
-            Ok(v) => v,
-            Err(_) => return RepoStatus::Unknown("github.com".into()),
-        },
-        Err(ureq::Error::Status(404, _)) => return RepoStatus::Gone,
-        Err(_) => return RepoStatus::Unknown("github.com".into()),
-    };
-    if v["archived"].as_bool().unwrap_or(false) {
-        return RepoStatus::Github {
-            archived: true,
-            last_commit: None,
-            commits_180d: None,
-            last_issue_close: None,
-            last_pr_merge: None,
-        };
-    }
-
-    // latest DEFAULT-BRANCH commit (not pushed_at - see module docs)
-    let last_commit = gh(&format!("{base}/commits?per_page=1"))
-        .call()
-        .ok()
-        .and_then(|r| r.into_json::<serde_json::Value>().ok())
-        .and_then(|c| date_of(&c[0]["commit"]["committer"]["date"]));
-
-    // commit count in the last 180 days via the Link-header trick
-    let since = (chrono::Utc::now() - chrono::Duration::days(180))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
-    let commits_180d = gh(&format!("{base}/commits?since={since}&per_page=1"))
-        .call()
-        .ok()
-        .map(|r| {
-            let link = r.header("link").unwrap_or("").to_string();
-            if let Some(n) = link
-                .split(',')
-                .find(|s| s.contains("rel=\"last\""))
-                .and_then(|s| s.split("page=").last())
-                .and_then(|s| s.split('>').next())
-                .and_then(|s| s.parse::<u64>().ok())
-            {
-                n
-            } else {
-                r.into_json::<serde_json::Value>()
-                    .ok()
-                    .and_then(|v| v.as_array().map(|a| a.len() as u64))
-                    .unwrap_or(0)
-            }
-        });
-
-    // most recently updated closed issue that is NOT a pull request
-    let last_issue_close = gh(&format!(
-        "{base}/issues?state=closed&sort=updated&direction=desc&per_page=20"
-    ))
-    .call()
-    .ok()
-    .and_then(|r| r.into_json::<serde_json::Value>().ok())
-    .and_then(|v| {
-        v.as_array()?.iter().find(|i| i.get("pull_request").is_none()).map(|i| {
-            date_of(&i["closed_at"])
-        })?
-    });
-
-    // most recently updated closed PR that was actually merged
-    let last_pr_merge = gh(&format!(
-        "{base}/pulls?state=closed&sort=updated&direction=desc&per_page=20"
-    ))
-    .call()
-    .ok()
-    .and_then(|r| r.into_json::<serde_json::Value>().ok())
-    .and_then(|v| {
-        v.as_array()?
-            .iter()
-            .find(|p| !p["merged_at"].is_null())
-            .map(|p| date_of(&p["merged_at"]))?
-    });
-
-    RepoStatus::Github { archived: false, last_commit, commits_180d, last_issue_close, last_pr_merge }
-}
-
-fn date_of(v: &serde_json::Value) -> Option<NaiveDate> {
+pub(crate) fn date_of(v: &serde_json::Value) -> Option<NaiveDate> {
     chrono::DateTime::parse_from_rfc3339(v.as_str()?).ok().map(|d| d.date_naive())
 }
