@@ -35,11 +35,61 @@ are needed.
 cargo pulse <crate>             # coloured terminal report (default)
 cargo pulse <crate> --markdown  # raw markdown (paste-ready)
 cargo pulse <crate> --json      # machine-readable (CI gates)
+cargo pulse audit [path]        # risk table for a project's direct dependencies
+cargo pulse audit --detail      # + one full stats block per dependency
+cargo pulse audit --out r.md    # also write the report to a file (.md or .json)
 cargo pulse --parity            # self-check: Rust scorer vs the reference model
 ```
 
 An optional `GITHUB_TOKEN` raises the GitHub API rate limit used for live
-repository checks.
+repository checks (5,000/h instead of 60/h).
+
+**Anonymous mode.** Without a token, only the single `/repos` call is made per
+repository: the recorded facts (archived, deleted) are still fully checked, but
+the four fine-grained activity signals (last commit, commit count, issue close,
+PR merge) are skipped and the model scores from the remaining features — the
+report notes when this happens. An audit warns upfront when the remaining
+anonymous quota cannot cover the run, including when the quota resets.
+
+**Caching.** GitHub responses are cached on disk (`$XDG_CACHE_HOME/cargo-pulse`
+or `~/.cache/cargo-pulse`) with their ETags; repeat lookups revalidate with
+conditional requests. With a token, a `304 Not Modified` revalidation costs no
+rate-limit quota, so repeated audits are effectively free; anonymous 304s still
+count against the 60/h limit (GitHub only exempts authenticated ones). A broken
+or missing cache never breaks a lookup.
+
+## Audit a project
+
+`cargo pulse audit` reads the project's metadata (via `cargo metadata`), runs
+every direct dependency through the same pipeline, and prints one table ranked
+highest risk first — recorded facts (declared unmaintained, archived) above
+forecasts. Dev and build dependencies are included and flagged; `--json` emits
+the full structured list for CI.
+
+```
+$ cd my-project && cargo pulse audit
+✓ project      my-project · 17 direct dependencies
+✓ auditing     17 dependencies · 1 declared/archived · 2 elevated · 14 low
+
+│   crate    │required│kind│       verdict        │P(abandoned)│
+├────────────┼────────┼────┼──────────────────────┼────────────┤
+│lazy_static │^1      │    │✗ unmaintained (RUST…)│—           │
+│old-parser  │^0.3    │    │⚠ elevated            │38% (24–55%)│
+│…           │        │    │                      │            │
+
+summary — 1 declared/archived · 2 elevated · 14 low
+```
+
+Columns: **required** is the version requirement from `Cargo.toml` (not the
+resolved version); **kind** marks `dev` and `build` dependencies (blank =
+normal); **P(abandoned)** is the calibrated ~2-year probability with its 95%
+band, shown only for modeled crates (facts need no forecast).
+
+Flags: `--detail` appends one compact block per dependency with the full
+single-crate stats (versions, dependents, repo status, maintainer heartbeat,
+percentile, probability band). `--out <file>` additionally writes the report to
+a file — `.md` for the markdown report, `.json` for the machine-readable one —
+while the terminal output prints as usual.
 
 ## How it works
 
