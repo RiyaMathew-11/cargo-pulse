@@ -47,23 +47,16 @@ repository checks (5,000/h instead of 60/h).
 **Anonymous mode.** Without a token, only the single `/repos` call is made per
 repository: the recorded facts (archived, deleted) are still fully checked, but
 the four fine-grained activity signals (last commit, commit count, issue close,
-PR merge) are skipped and the model scores from the remaining features — the
-report notes when this happens. An audit warns upfront when the remaining
-anonymous quota cannot cover the run, including when the quota resets.
+PR merge) are skipped and the model scores from the remaining features.
 
 **Caching.** GitHub responses are cached on disk (`$XDG_CACHE_HOME/cargo-pulse`
 or `~/.cache/cargo-pulse`) with their ETags; repeat lookups revalidate with
-conditional requests. With a token, a `304 Not Modified` revalidation costs no
-rate-limit quota, so repeated audits are effectively free; anonymous 304s still
-count against the 60/h limit (GitHub only exempts authenticated ones). A broken
-or missing cache never breaks a lookup.
+conditional requests.
 
 ## Audit a project
 
 `cargo pulse audit` reads the project's metadata (via `cargo metadata`), runs
-every direct dependency through the same pipeline, and prints one table ranked
-highest risk first — recorded facts (declared unmaintained, archived) above
-forecasts. Dev and build dependencies are included and flagged; `--json` emits
+every direct dependency through the same pipeline. Dev and build dependencies are included and flagged; `--json` emits
 the full structured list for CI.
 
 ```
@@ -80,16 +73,6 @@ $ cd my-project && cargo pulse audit
 summary — 1 declared/archived · 2 elevated · 14 low
 ```
 
-Columns: **required** is the version requirement from `Cargo.toml` (not the
-resolved version); **kind** marks `dev` and `build` dependencies (blank =
-normal); **P(abandoned)** is the calibrated ~2-year probability with its 95%
-band, shown only for modeled crates (facts need no forecast).
-
-Flags: `--detail` appends one compact block per dependency with the full
-single-crate stats (versions, dependents, repo status, maintainer heartbeat,
-percentile, probability band). `--out <file>` additionally writes the report to
-a file — `.md` for the markdown report, `.json` for the machine-readable one —
-while the terminal output prints as usual.
 
 ## How it works
 
@@ -101,11 +84,6 @@ while the terminal output prints as usual.
    report a registry percentile and a gold-calibrated two-year probability with a
    bootstrap band.
 
-The probability is calibrated against a human/LLM-judged gold standard. The model
-ties a simple "months-since-last-release" rule on the general population and beats
-it on independent signals, while adding a calibrated probability a bare rule
-cannot provide. Full method, evaluation, and caveats are in the accompanying MSc
-dissertation.
 
 ## Build from source
 
