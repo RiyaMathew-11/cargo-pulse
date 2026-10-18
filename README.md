@@ -41,13 +41,13 @@ cargo pulse audit --out r.md    # also write the report to a file (.md or .json)
 cargo pulse --parity            # self-check: Rust scorer vs the reference model
 ```
 
-An optional `GITHUB_TOKEN` raises the GitHub API rate limit used for live
-repository checks (5,000/h instead of 60/h).
-
-**Anonymous mode.** Without a token, only the single `/repos` call is made per
-repository: the recorded facts (archived, deleted) are still fully checked, but
-the four fine-grained activity signals (last commit, commit count, issue close,
-PR merge) are skipped and the model scores from the remaining features.
+**GitHub token.** Live repository checks use the GitHub API. Without a
+`GITHUB_TOKEN` the tool makes the same calls anonymously (60 requests/h, about
+5 per live crate); a token raises this to 5,000/h. If the rate limit is hit,
+cargo-pulse **stops with an error** asking for a token instead of forecasting
+without the repository activity signals. A token needs no
+scopes: create one at https://github.com/settings/tokens, then
+`export GITHUB_TOKEN=<token>`.
 
 **Caching.** GitHub responses are cached on disk (`$XDG_CACHE_HOME/cargo-pulse`
 or `~/.cache/cargo-pulse`) with their ETags; repeat lookups revalidate with

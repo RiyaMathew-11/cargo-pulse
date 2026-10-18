@@ -59,35 +59,12 @@ pub fn run(
         bail!("no crates.io dependencies found in {}", path.display());
     }
 
-    // anonymous mode: warn upfront if the GitHub quota cannot cover the run
-    if let Some((remaining, reset)) = crate::forge::anon_rate_budget() {
-        let n = deps.len() as u64; // ≤1 GitHub call per dep without a token
-        let mins = reset.saturating_sub(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        ) / 60;
-        if n > remaining {
-            eprintln!(
-                "⚠ anonymous GitHub budget: {remaining} API call(s) left for up to {n} repo \
-                 checks; quota resets in ~{mins} min. set GITHUB_TOKEN (5,000/h) — continuing, \
-                 over-budget checks degrade gracefully."
-            );
-        } else if n > 40 {
-            eprintln!(
-                "note: large anonymous audit (up to {n} GitHub checks); set GITHUB_TOKEN to \
-                 avoid rate limits."
-            );
-        }
-    }
-
     let pb = stage("auditing");
     let total = deps.len();
     let mut rows: Vec<Assessment> = Vec::new();
     for (i, dep) in deps.into_iter().enumerate() {
         pb.set_message(format!("{} ({}/{total})", dep.name, i + 1));
-        let (stats, outcome) = assess(&dep.name, art, today);
+        let (stats, outcome) = assess(&dep.name, art, today)?;
         rows.push(Assessment { dep, stats, outcome });
         std::thread::sleep(std::time::Duration::from_millis(300)); // crates.io politeness
     }
@@ -166,11 +143,11 @@ fn direct_deps(path: &Path) -> Result<(String, Vec<Dep>)> {
 
 /// One dependency through the single-crate pipeline. Every failure is an
 /// Error row; an audit never aborts over one crate.
-fn assess(name: &str, art: &Artifacts, today: NaiveDate) -> (Option<Stats>, Outcome) {
+fn assess(name: &str, art: &Artifacts, today: NaiveDate) -> Result<(Option<Stats>, Outcome)> {
     let info = match crate::net::fetch_crate(name) {
         Ok(Some(i)) => i,
-        Ok(None) => return (None, Outcome::NotFound),
-        Err(e) => return (None, Outcome::Error(e.to_string())),
+        Ok(None) => return Ok((None, Outcome::NotFound)),
+        Err(e) => return Ok((None, Outcome::Error(e.to_string()))),
     };
     let age_days = (today - info.created_at).num_days();
     let mut stats = Stats {
@@ -186,25 +163,26 @@ fn assess(name: &str, art: &Artifacts, today: NaiveDate) -> (Option<Stats>, Outc
 
     let advisories = match crate::net::fetch_advisories(name) {
         Ok(a) => a,
-        Err(e) => return (Some(stats), Outcome::Error(e.to_string())),
+        Err(e) => return Ok((Some(stats), Outcome::Error(e.to_string()))),
     };
     stats.advisory_notes = advisories.iter().filter(|a| !a.unmaintained).count();
     if let Some(a) = advisories.iter().find(|a| a.unmaintained) {
         let out = Outcome::Unmaintained { advisory: a.id.clone(), summary: a.summary.clone() };
-        return (Some(stats), out);
+        return Ok((Some(stats), out));
     }
 
-    let repo = crate::forge::check_repo(info.repository.as_deref());
+    // a rate limit aborts the audit rather than serving missing signals
+    let repo = crate::forge::check_repo(info.repository.as_deref())?;
     stats.repo = repo_label(&repo);
     if matches!(
         &repo,
         crate::forge::RepoStatus::Github { archived: true, .. }
             | crate::forge::RepoStatus::OtherForge { archived: true, .. }
     ) {
-        return (Some(stats), Outcome::Archived);
+        return Ok((Some(stats), Outcome::Archived));
     }
     if age_days < (art.meta.eligibility_months as i64) * 30 {
-        return (Some(stats), Outcome::TooYoung { months: age_days as f64 / 30.44 });
+        return Ok((Some(stats), Outcome::TooYoung { months: age_days as f64 / 30.44 }));
     }
 
     let owner_date = art.owners.get(name).copied();
@@ -213,21 +191,20 @@ fn assess(name: &str, art: &Artifacts, today: NaiveDate) -> (Option<Stats>, Outc
     let score = art.score(&rep.x);
     let pct = art.percentile(score);
     let (p, lo, hi) = art.probability(score, age_days as f64 / 365.25);
-    (Some(stats), Outcome::Modeled { p, lo, hi, pct, uncertain: hi - lo > 0.60 })
+    Ok((Some(stats), Outcome::Modeled { p, lo, hi, pct, uncertain: hi - lo > 0.60 }))
 }
 
 fn repo_label(repo: &crate::forge::RepoStatus) -> String {
     use crate::forge::RepoStatus::*;
     match repo {
         Github { archived: true, .. } | OtherForge { archived: true, .. } => "archived".into(),
-        Github { degraded: true, .. } => "github: live (detail skipped — anonymous)".into(),
         Github { .. } => "github: live".into(),
         OtherForge { forge, .. } => format!("{forge}: live"),
         Gone => "listed but not found (deleted/renamed/private)".into(),
         NoRepo => "none listed".into(),
         // a supported forge landing here means the API call failed, not the host
         Unknown(h) if matches!(h.as_str(), "github.com" | "gitlab.com" | "codeberg.org") => {
-            format!("{h}: check failed (rate-limited? set GITHUB_TOKEN)")
+            format!("{h}: check failed (rate-limited or network error)")
         }
         Unknown(h) => format!("{h}: unsupported"),
     }

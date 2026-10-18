@@ -1,6 +1,6 @@
 //! cargo-pulse: abandonment risk for crates.io packages.
 //!
-//! Pipeline (facts always preempt forecasts):
+//! Pipeline:
 //!   1. crates.io  - exists? current stats
 //!   2. OSV/RustSec - declared unmaintained? -> report the fact, stop
 //!   3. forge      - archived / deleted?     -> report the fact, stop
@@ -8,15 +8,15 @@
 //!   5. model: live features -> bagged Cox score -> registry percentile
 //!      -> gold-calibrated P(abandoned within ~2y) with (score,age) band
 //!
-//! The report is authored ONCE as markdown, then routed:
+//! The report is authored:
 //!   default      rendered in-terminal (termimad: headings, bullets)
-//!   --markdown   raw markdown (glow-compatible, paste-ready)
+//!   --markdown   raw markdown (glow-compatible)
 //!   --json       machine-readable (CI gates)
 //!
 //! Usage:  cargo-pulse <crate> [--markdown|--json]   (also: cargo pulse)
 //!         cargo-pulse audit [path] [--detail] [--out <f>] [--markdown|--json]
 //!         cargo-pulse --parity                      (train/serve harness)
-//!         env: GITHUB_TOKEN (optional), CARGO_PULSE_DATA (artifact dir)
+//!         env: GITHUB_TOKEN (optional; needed once the 60/h anonymous limit hits), CARGO_PULSE_DATA (artifact dir)
 
 mod audit;
 mod audit_report;
@@ -67,9 +67,7 @@ fn skin_for(sev: Sev) -> termimad::MadSkin {
     s
 }
 
-/// A cargo-style stage line: spins on stderr while working, persists
-/// as a checkmark summary. Invisible when stderr is not a terminal, so
-/// pipes and --json consumers never see it.
+
 fn stage(label: &str) -> indicatif::ProgressBar {
     let pb = indicatif::ProgressBar::new_spinner();
     pb.set_style(

@@ -1,5 +1,4 @@
-//! The single-crate report: pipeline steps 1–5 for one named crate,
-//! authored as markdown and routed by main's emit().
+//! The single-crate report: pipeline steps 1–5 for one named crate
 
 use crate::data::Artifacts;
 use crate::{Mode, Sev, ago, done, emit, stage};
@@ -67,7 +66,7 @@ pub fn run(name: &str, mode: &Mode, art: &Artifacts) -> Result<()> {
 
     // 3 ─ forge
     let pb = stage("repository");
-    let repo = forge::check_repo(info.repository.as_deref());
+    let repo = forge::check_repo(info.repository.as_deref())?;
     done(
         pb,
         match &repo {
@@ -97,12 +96,8 @@ pub fn run(name: &str, mode: &Mode, art: &Artifacts) -> Result<()> {
                 "* ⚠ repository listed but **not found** (deleted/renamed/private) — abandonment evidence".into();
             j["repo"] = "gone".into();
         }
-        forge::RepoStatus::Github { degraded, .. } => {
-            repo_line = if *degraded {
-                "* repository live, not archived (github) · repo detail skipped — anonymous mode, set GITHUB_TOKEN".into()
-            } else {
-                "* repository live, not archived (github)".into()
-            };
+        forge::RepoStatus::Github { .. } => {
+            repo_line = "* repository live, not archived (github)".into();
         }
         forge::RepoStatus::OtherForge { forge, .. } => {
             repo_line = format!("* repository not archived ({forge}); activity signals unavailable off-GitHub");

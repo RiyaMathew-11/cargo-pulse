@@ -1,22 +1,13 @@
 //! Forge checks (GitHub / GitLab / Codeberg): the archived/deleted facts
-//! and, on GitHub, the model's repo-tier activity signals. Serving
-//! semantics pinned by the 12/08 manual pipeline test: days_since_commit
-//! reads the DEFAULT BRANCH commits endpoint (not pushed_at), commit
-//! counts use the Link-header trick, and non-GitHub forges get the
-//! explicit archived check only. GitHub calls go through the on-disk
-//! ETag cache (a 304 costs no quota). Without GITHUB_TOKEN only the
-//! single /repos call is made per repo: facts stay fully checked, the
-//! four fine-grained signal calls are skipped (`degraded`).
+//! and, on GitHub, the model's repo-tier activity signals.
 
 use crate::net::{date_of, get};
 use chrono::NaiveDate;
 
 pub enum RepoStatus {
     /// GitHub repo found: archived flag + the model's repo-tier signals.
-    /// `degraded` = anonymous mode, fine-grained signal calls skipped.
     Github {
         archived: bool,
-        degraded: bool,
         last_commit: Option<NaiveDate>,   // default branch
         commits_180d: Option<u64>,        // default branch
         last_issue_close: Option<NaiveDate>,
@@ -30,16 +21,17 @@ pub enum RepoStatus {
     Unknown(String),
 }
 
-pub fn check_repo(url: Option<&str>) -> RepoStatus {
-    let Some(url) = url else { return RepoStatus::NoRepo };
+/// Err only when GitHub rate-limits us; every other failure is a status.
+pub fn check_repo(url: Option<&str>) -> anyhow::Result<RepoStatus> {
+    let Some(url) = url else { return Ok(RepoStatus::NoRepo) };
     let path = url
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .trim_end_matches('/')
         .trim_end_matches(".git");
     let parts: Vec<&str> = path.split('/').collect();
-    match parts.first().copied() {
-        Some("github.com") if parts.len() >= 3 => github(parts[1], parts[2]),
+    Ok(match parts.first().copied() {
+        Some("github.com") if parts.len() >= 3 => github(parts[1], parts[2])?,
         Some("gitlab.com") if parts.len() >= 3 => {
             let proj = parts[1..].join("%2F");
             simple_archived(
@@ -53,23 +45,30 @@ pub fn check_repo(url: Option<&str>) -> RepoStatus {
         ),
         Some(host) => RepoStatus::Unknown(host.to_string()),
         None => RepoStatus::NoRepo,
-    }
+    })
 }
 
-/// Anonymous-mode quota probe; GET /rate_limit itself costs nothing.
-/// None when a token is set (budget is then a non-issue) or on any failure.
-pub fn anon_rate_budget() -> Option<(u64, u64)> {
-    if std::env::var("GITHUB_TOKEN").is_ok() {
-        return None;
+fn token() -> Option<String> {
+    std::env::var("GITHUB_TOKEN").ok().filter(|t| !t.is_empty())
+}
+
+/// The error a rate-limited GitHub call stops the run with.
+fn rate_limited(reset: Option<u64>) -> anyhow::Error {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let retry = reset
+        .map(|r| format!("retry in ~{} min", r.saturating_sub(now) / 60 + 1))
+        .unwrap_or_else(|| "retry later".into());
+    match token() {
+        None => anyhow::anyhow!(
+            "GitHub rate limit reached (60 requests/h without a token); {retry}.\n\
+             To keep going now, set a token (no scopes needed):\n  \
+             export GITHUB_TOKEN=<token>"
+        ),
+        Some(_) => anyhow::anyhow!("GitHub rate limit reached for GITHUB_TOKEN; {retry}."),
     }
-    let v: serde_json::Value = get("https://api.github.com/rate_limit")
-        .set("Accept", "application/vnd.github+json")
-        .call()
-        .ok()?
-        .into_json()
-        .ok()?;
-    let core = &v["resources"]["core"];
-    Some((core["remaining"].as_u64()?, core["reset"].as_u64()?))
 }
 
 fn simple_archived(api_url: &str, forge: &str) -> RepoStatus {
@@ -91,7 +90,7 @@ fn simple_archived(api_url: &str, forge: &str) -> RepoStatus {
 
 fn gh(url: &str) -> ureq::Request {
     let mut req = get(url).set("Accept", "application/vnd.github+json");
-    if let Ok(tok) = std::env::var("GITHUB_TOKEN") {
+    if let Some(tok) = token() {
         req = req.set("Authorization", &format!("Bearer {tok}"));
     }
     req
@@ -101,6 +100,7 @@ enum GhResp {
     Ok(serde_json::Value, Option<String>), // (body, link header)
     NotFound,
     Fail,
+    RateLimited(Option<u64>), // reset time if GitHub sent one
 }
 
 /// GitHub GET through the ETag cache: send If-None-Match when a validator
@@ -129,44 +129,49 @@ fn gh_get(url: &str) -> GhResp {
             }
         }
         Err(ureq::Error::Status(404, _)) => GhResp::NotFound,
+        // primary limit: 403 + remaining=0; secondary limit: 403/429 + retry-after
+        Err(ureq::Error::Status(code @ (403 | 429), r))
+            if code == 429
+                || r.header("x-ratelimit-remaining") == Some("0")
+                || r.header("retry-after").is_some() =>
+        {
+            GhResp::RateLimited(r.header("x-ratelimit-reset").and_then(|s| s.parse().ok()))
+        }
         Err(_) => GhResp::Fail,
     }
 }
 
-fn github(owner: &str, repo: &str) -> RepoStatus {
+/// A signal call: the body on success, None on an ordinary failure,
+/// Err when rate-limited (the run must stop, not serve a missing signal).
+fn signal(url: &str) -> anyhow::Result<Option<(serde_json::Value, Option<String>)>> {
+    match gh_get(url) {
+        GhResp::Ok(v, link) => Ok(Some((v, link))),
+        GhResp::RateLimited(reset) => Err(rate_limited(reset)),
+        GhResp::NotFound | GhResp::Fail => Ok(None),
+    }
+}
+
+fn github(owner: &str, repo: &str) -> anyhow::Result<RepoStatus> {
     let base = format!("https://api.github.com/repos/{owner}/{repo}");
     let v = match gh_get(&base) {
         GhResp::Ok(v, _) => v,
-        GhResp::NotFound => return RepoStatus::Gone,
-        GhResp::Fail => return RepoStatus::Unknown("github.com".into()),
+        GhResp::NotFound => return Ok(RepoStatus::Gone),
+        GhResp::Fail => return Ok(RepoStatus::Unknown("github.com".into())),
+        GhResp::RateLimited(reset) => return Err(rate_limited(reset)),
     };
     if v["archived"].as_bool().unwrap_or(false) {
-        return RepoStatus::Github {
+        return Ok(RepoStatus::Github {
             archived: true,
-            degraded: false,
             last_commit: None,
             commits_180d: None,
             last_issue_close: None,
             last_pr_merge: None,
-        };
-    }
-    if std::env::var("GITHUB_TOKEN").is_err() {
-        // anonymous: the facts are checked, the 4 signal calls are skipped
-        return RepoStatus::Github {
-            archived: false,
-            degraded: true,
-            last_commit: None,
-            commits_180d: None,
-            last_issue_close: None,
-            last_pr_merge: None,
-        };
+        });
     }
 
     // latest DEFAULT-BRANCH commit (not pushed_at - see module docs)
-    let last_commit = match gh_get(&format!("{base}/commits?per_page=1")) {
-        GhResp::Ok(c, _) => date_of(&c[0]["commit"]["committer"]["date"]),
-        _ => None,
-    };
+    let last_commit = signal(&format!("{base}/commits?per_page=1"))?
+        .and_then(|(c, _)| date_of(&c[0]["commit"]["committer"]["date"]));
 
     // commit count in the last 180 days via the Link-header trick; the
     // window start is snapped to UTC midnight so the URL (= cache key)
@@ -174,43 +179,40 @@ fn github(owner: &str, repo: &str) -> RepoStatus {
     let since = (chrono::Utc::now() - chrono::Duration::days(180))
         .format("%Y-%m-%dT00:00:00Z")
         .to_string();
-    let commits_180d = match gh_get(&format!("{base}/commits?since={since}&per_page=1")) {
-        GhResp::Ok(body, link) => Some(link_count(link.as_deref(), &body)),
-        _ => None,
-    };
+    let commits_180d = signal(&format!("{base}/commits?since={since}&per_page=1"))?
+        .map(|(body, link)| link_count(link.as_deref(), &body));
 
     // most recently updated closed issue that is NOT a pull request
-    let last_issue_close = match gh_get(&format!(
+    let last_issue_close = signal(&format!(
         "{base}/issues?state=closed&sort=updated&direction=desc&per_page=20"
-    )) {
-        GhResp::Ok(v, _) => v.as_array().and_then(|a| {
+    ))?
+    .and_then(|(v, _)| {
+        v.as_array().and_then(|a| {
             a.iter()
                 .find(|i| i.get("pull_request").is_none())
                 .and_then(|i| date_of(&i["closed_at"]))
-        }),
-        _ => None,
-    };
+        })
+    });
 
     // most recently updated closed PR that was actually merged
-    let last_pr_merge = match gh_get(&format!(
+    let last_pr_merge = signal(&format!(
         "{base}/pulls?state=closed&sort=updated&direction=desc&per_page=20"
-    )) {
-        GhResp::Ok(v, _) => v.as_array().and_then(|a| {
+    ))?
+    .and_then(|(v, _)| {
+        v.as_array().and_then(|a| {
             a.iter()
                 .find(|p| !p["merged_at"].is_null())
                 .and_then(|p| date_of(&p["merged_at"]))
-        }),
-        _ => None,
-    };
+        })
+    });
 
-    RepoStatus::Github {
+    Ok(RepoStatus::Github {
         archived: false,
-        degraded: false,
         last_commit,
         commits_180d,
         last_issue_close,
         last_pr_merge,
-    }
+    })
 }
 
 fn link_count(link: Option<&str>, body: &serde_json::Value) -> u64 {
