@@ -32,7 +32,7 @@ are needed.
 ## Usage
 
 ```sh
-cargo pulse <crate>             # coloured terminal report (default)
+cargo pulse <crate>             # terminal report (default)
 cargo pulse <crate> --markdown  # raw markdown (paste-ready)
 cargo pulse <crate> --json      # machine-readable (CI gates)
 cargo pulse audit [path]        # risk table for a project's direct dependencies
@@ -92,6 +92,14 @@ git clone https://github.com/RiyaMathew-11/cargo-pulse
 cd cargo-pulse
 cargo build --release
 ./target/release/cargo-pulse serde
+```
+
+With Nix (flakes), no Rust toolchain required:
+
+```sh
+nix run github:RiyaMathew-11/cargo-pulse -- serde      # run without installing
+nix profile install github:RiyaMathew-11/cargo-pulse   # or install it
+nix develop                                            # dev shell (cargo, rustc, clippy)
 ```
 
 ## License
