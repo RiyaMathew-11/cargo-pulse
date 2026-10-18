@@ -1,6 +1,6 @@
 [package]
 name = "cargo-pulse"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Abandonment risk for crates.io packages: explicit signals first, a calibrated 2-year probability second"
