@@ -4,10 +4,28 @@
 
 use anyhow::{Context, Result, anyhow};
 use chrono::NaiveDate;
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-const UA: &str = "cargo-pulse/0.1 (dissertation research tool)";
+const UA: &str = concat!("cargo-pulse/", env!("CARGO_PKG_VERSION"), " (dissertation research tool)");
+
+/// crates.io politeness: at most one request per CRATES_IO_SPACING, measured
+/// from the previous request's start, so network latency counts toward the
+/// gap instead of being added to a fixed sleep. Process-wide, so the audit's
+/// threads cannot exceed the rate between them.
+const CRATES_IO_SPACING: Duration = Duration::from_millis(500);
+
+fn pace_crates_io() {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(t) = *last {
+        let elapsed = t.elapsed();
+        if elapsed < CRATES_IO_SPACING {
+            std::thread::sleep(CRATES_IO_SPACING - elapsed);
+        }
+    }
+    *last = Some(Instant::now());
+}
 
 fn agent() -> &'static ureq::Agent {
     static A: OnceLock<ureq::Agent> = OnceLock::new();
@@ -22,15 +40,16 @@ pub(crate) fn get(url: &str) -> ureq::Request {
     agent().get(url).set("User-Agent", UA)
 }
 
-/// GET with polite pacing and retries on transient transport errors -
-/// including resets MID-BODY (large responses like serde_yaml's version
-/// list can drop while streaming). None = 404.
+/// crates.io GET with polite pacing and retries on transient transport
+/// errors - including resets MID-BODY (large responses like serde_yaml's
+/// version list can drop while streaming). None = 404.
 fn get_json(url: &str) -> Result<Option<serde_json::Value>> {
     let mut last: Option<anyhow::Error> = None;
     for attempt in 0..3 {
         if attempt > 0 {
             std::thread::sleep(Duration::from_millis(900));
         }
+        pace_crates_io();
         match get(url).call() {
             Ok(r) => match r.into_string() {
                 Ok(body) => match serde_json::from_str(&body) {
@@ -74,14 +93,12 @@ pub fn fetch_crate(name: &str) -> Result<Option<CrateInfo>> {
     }
     versions.sort();
 
-    std::thread::sleep(Duration::from_millis(400)); // crates.io politeness
     let reverse_deps = get_json(&format!(
         "https://crates.io/api/v1/crates/{name}/reverse_dependencies?per_page=1"
     ))?
     .map(|rd| rd["meta"]["total"].as_u64().unwrap_or(0))
     .unwrap_or(0);
 
-    std::thread::sleep(Duration::from_millis(400));
     let n_owners = get_json(&format!("https://crates.io/api/v1/crates/{name}/owners"))?
         .map(|ow| ow["users"].as_array().map(|a| a.len() as u64).unwrap_or(0))
         .unwrap_or(0);

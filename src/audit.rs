@@ -2,12 +2,32 @@
 //! project. Dependencies come from `cargo metadata --no-deps`; each crate
 //! then runs the same pipeline as a single lookup (facts first, then the
 //! model). Rendering lives in audit_report.rs.
+//!
+//! Concurrency: the crates.io lookups run one at a time on the main thread
+//! (crates.io asks clients to pace themselves); the OSV and forge lookups
+//! for different dependencies, which dominate the wall time, run on a small
+//! pool of WORKERS threads as each crate's registry record arrives.
 
 use crate::data::Artifacts;
+use crate::net::CrateInfo;
 use crate::{Mode, done, emit, stage};
 use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, mpsc};
+
+/// Threads running OSV + forge lookups. Kept small: GitHub's secondary
+/// limits are tripped by bursts, and throughput is bounded by the paced
+/// crates.io feed anyway (~2 crates/s at most).
+const WORKERS: usize = 3;
+
+/// What the main thread learned from crates.io, handed to a worker.
+enum Fetched {
+    Info(Box<CrateInfo>),
+    NotFound,
+    Error(String),
+}
 
 pub struct Dep {
     pub(crate) name: String,
@@ -61,13 +81,64 @@ pub fn run(
 
     let pb = stage("auditing");
     let total = deps.len();
-    let mut rows: Vec<Assessment> = Vec::new();
-    for (i, dep) in deps.into_iter().enumerate() {
-        pb.set_message(format!("{} ({}/{total})", dep.name, i + 1));
-        let (stats, outcome) = assess(&dep.name, art, today)?;
-        rows.push(Assessment { dep, stats, outcome });
-        std::thread::sleep(std::time::Duration::from_millis(300)); // crates.io politeness
+    let results: Mutex<Vec<Option<Assessment>>> = Mutex::new((0..total).map(|_| None).collect());
+    let failed: Mutex<Option<anyhow::Error>> = Mutex::new(None);
+    let stop = AtomicBool::new(false);
+    let (tx, rx) = mpsc::channel::<(usize, Dep, Fetched)>();
+    let rx = Mutex::new(rx);
+
+    std::thread::scope(|scope| {
+        for _ in 0..WORKERS {
+            scope.spawn(|| {
+                loop {
+                    let job = rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                    let Ok((i, dep, fetched)) = job else { break };
+                    if stop.load(Ordering::Relaxed) {
+                        continue; // drain: a rate limit already ended the run
+                    }
+                    let (stats, outcome) = match fetched {
+                        Fetched::NotFound => (None, Outcome::NotFound),
+                        Fetched::Error(e) => (None, Outcome::Error(e)),
+                        Fetched::Info(info) => match assess(&dep.name, &info, art, today) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                stop.store(true, Ordering::Relaxed);
+                                *failed.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
+                                continue;
+                            }
+                        },
+                    };
+                    results.lock().unwrap_or_else(|e| e.into_inner())[i] =
+                        Some(Assessment { dep, stats, outcome });
+                }
+            });
+        }
+        for (i, dep) in deps.into_iter().enumerate() {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            pb.set_message(format!("{} ({}/{total})", dep.name, i + 1));
+            let fetched = match crate::net::fetch_crate(&dep.name) {
+                Ok(Some(info)) => Fetched::Info(Box::new(info)),
+                Ok(None) => Fetched::NotFound,
+                Err(e) => Fetched::Error(e.to_string()),
+            };
+            if tx.send((i, dep, fetched)).is_err() {
+                break;
+            }
+        }
+        drop(tx);
+    });
+
+    if let Some(e) = failed.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        return Err(e);
     }
+    let mut rows: Vec<Assessment> = results
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner())
+        .into_iter()
+        .flatten()
+        .collect();
     rows.sort_by(|a, b| rank(a).partial_cmp(&rank(b)).unwrap());
     let counts = crate::audit_report::Counts::of(&rows);
     done(pb, format!("{total} dependencies · {}", counts.brief()));
@@ -141,14 +212,15 @@ fn direct_deps(path: &Path) -> Result<(String, Vec<Dep>)> {
     Ok((label, deps))
 }
 
-/// One dependency through the single-crate pipeline. Every failure is an
-/// Error row; an audit never aborts over one crate.
-fn assess(name: &str, art: &Artifacts, today: NaiveDate) -> Result<(Option<Stats>, Outcome)> {
-    let info = match crate::net::fetch_crate(name) {
-        Ok(Some(i)) => i,
-        Ok(None) => return Ok((None, Outcome::NotFound)),
-        Err(e) => return Ok((None, Outcome::Error(e.to_string()))),
-    };
+/// One dependency through the rest of the single-crate pipeline (OSV, forge,
+/// model), given its crates.io record. Every failure is an Error row; only a
+/// GitHub rate limit aborts the audit.
+fn assess(
+    name: &str,
+    info: &CrateInfo,
+    art: &Artifacts,
+    today: NaiveDate,
+) -> Result<(Option<Stats>, Outcome)> {
     let age_days = (today - info.created_at).num_days();
     let mut stats = Stats {
         versions: info.versions.len(),
@@ -186,7 +258,7 @@ fn assess(name: &str, art: &Artifacts, today: NaiveDate) -> Result<(Option<Stats
     }
 
     let owner_date = art.owners.get(name).copied();
-    let rep = crate::features::assemble(&art.meta.features, &info, &repo, owner_date, today);
+    let rep = crate::features::assemble(&art.meta.features, info, &repo, owner_date, today);
     stats.heartbeat = rep.heartbeat;
     let score = art.score(&rep.x);
     let pct = art.percentile(score);
