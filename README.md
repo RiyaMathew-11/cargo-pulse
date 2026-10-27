@@ -56,8 +56,12 @@ conditional requests.
 ## Audit a project
 
 `cargo pulse audit` reads the project's metadata (via `cargo metadata`), runs
-every direct dependency through the same pipeline. Dev and build dependencies are included and flagged; `--json` emits
-the full structured list for CI.
+every direct dependency through the same pipeline. Dev and build dependencies
+are included and flagged; `--json` emits the full structured list for CI.
+The crates.io lookups run one at a time, paced to two requests per second;
+the OSV and GitHub lookups for different dependencies run concurrently on
+three threads, so an audit takes roughly 1.5 s per dependency, of which
+almost all is waiting on the network.
 
 ```
 $ cd my-project && cargo pulse audit
