@@ -7,13 +7,18 @@ use chrono::NaiveDate;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-const UA: &str = concat!("cargo-pulse/", env!("CARGO_PKG_VERSION"), " (dissertation research tool)");
+/// crates.io requires a user agent that identifies the client and gives a contact URL.
+const UA: &str = concat!(
+    "cargo-pulse/",
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("CARGO_PKG_REPOSITORY"),
+    ")"
+);
 
-/// crates.io politeness: at most one request per CRATES_IO_SPACING, measured
-/// from the previous request's start, so network latency counts toward the
-/// gap instead of being added to a fixed sleep. Process-wide, so the audit's
-/// threads cannot exceed the rate between them.
-const CRATES_IO_SPACING: Duration = Duration::from_millis(500);
+/// crates.io permits one request each second (crates.io/data-access).
+/// The tool measures the interval from the start of the previous request, for all threads.
+const CRATES_IO_SPACING: Duration = Duration::from_millis(1000);
 
 fn pace_crates_io() {
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
