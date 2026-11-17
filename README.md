@@ -1,13 +1,12 @@
 # cargo-pulse
 
-**Abandonment risk for crates.io packages - explicit signals first, a calibrated two-year probability second.**
+**Abandonment risk for crates.io packages: recorded facts first, a calibrated two-year probability second.**
 
-`cargo-pulse` tells you whether a Rust crate is at risk of becoming abandoned.
-A recorded fact always outranks a forecast: if a crate is already declared
-unmaintained (RustSec) or its repository is archived, the tool reports that and
-stops. Only for a live, undeclared, sufficiently old crate does it run a model -
-a bagged survival (Cox) model over registry and repository signals - and report a
-**calibrated probability of abandonment within ~2 years**, with an uncertainty band.
+`cargo-pulse` shows the abandonment risk of a Rust crate.
+A recorded fact has priority over a forecast.
+If RustSec declares the crate unmaintained, or its repository is archived, the tool reports this and stops.
+For a live crate that is old enough, a bagged survival (Cox) model scores registry and repository signals.
+The result is a **calibrated probability of abandonment in approximately two years**, with an uncertainty band.
 
 ```
 $ cargo pulse serde
@@ -26,8 +25,7 @@ cargo install cargo-pulse
 cargo pulse <crate>          # e.g. cargo pulse serde
 ```
 
-The model and its data are compiled into the binary, so no extra files or setup
-are needed.
+The binary contains the model and its data. No other files are necessary.
 
 ## Usage
 
@@ -41,28 +39,22 @@ cargo pulse audit --out r.md    # also write the report to a file (.md or .json)
 cargo pulse --parity            # self-check: Rust scorer vs the reference model
 ```
 
-**GitHub token.** Live repository checks use the GitHub API. Without a
-`GITHUB_TOKEN` the tool makes the same calls anonymously (60 requests/h, about
-5 per live crate); a token raises this to 5,000/h. If the rate limit is hit,
-cargo-pulse **stops with an error** asking for a token instead of forecasting
-without the repository activity signals. A token needs no
-scopes: create one at https://github.com/settings/tokens, then
-`export GITHUB_TOKEN=<token>`.
+**GitHub token.** The repository check uses the GitHub API.
+Without a `GITHUB_TOKEN`, GitHub permits 60 requests each hour. One live crate uses approximately 5.
+With a token, the limit is 5,000 each hour. The token needs no scopes.
+At the limit, the tool stops with an error. It does not forecast without repository signals.
+Create a token at https://github.com/settings/tokens, then run `export GITHUB_TOKEN=<token>`.
 
-**Caching.** GitHub responses are cached on disk (`$XDG_CACHE_HOME/cargo-pulse`
-or `~/.cache/cargo-pulse`) with their ETags; repeat lookups revalidate with
-conditional requests.
+**Cache.** GitHub responses are stored with their ETags in `$XDG_CACHE_HOME/cargo-pulse` or `~/.cache/cargo-pulse`.
+A repeat lookup sends a conditional request.
 
 ## Audit a project
 
-`cargo pulse audit` reads the project's metadata (via `cargo metadata`), runs
-every direct dependency through the same pipeline. Dev and build dependencies
-are included and flagged; `--json` emits the full structured list for CI.
-The crates.io lookups run one at a time, paced to one request per second
-as the [crates.io data access policy](https://crates.io/data-access) asks;
-the OSV and GitHub lookups for different dependencies run concurrently on
-three threads, so an audit takes roughly 3 s per dependency, of which
-almost all is waiting on the network.
+`cargo pulse audit` reads the project metadata with `cargo metadata` and runs each direct dependency through the same stages.
+Dev and build dependencies are included and flagged. The `--json` flag gives the full list for CI.
+crates.io lookups run at one request each second, as the [crates.io data access policy](https://crates.io/data-access) requires.
+OSV and GitHub lookups run on three threads.
+An audit takes approximately 3 s for each dependency, almost all network wait.
 
 ```
 $ cd my-project && cargo pulse audit
@@ -78,17 +70,14 @@ $ cd my-project && cargo pulse audit
 summary — 1 declared/archived · 2 elevated · 14 low
 ```
 
-
 ## How it works
 
-1. **crates.io** - does the crate exist? current stats.
-2. **RustSec / OSV** - declared unmaintained? → report and stop.
-3. **Forge** - repository archived or deleted? → report and stop.
-4. **Age gate** - at least 18 months old? otherwise "too young to assess".
-5. **Forecast** - assemble features, score with the bagged Cox ensemble, and
-   report a registry percentile and a gold-calibrated two-year probability with a
-   bootstrap band.
-
+1. **crates.io.** Check that the crate exists and read its stats.
+2. **RustSec / OSV.** If declared unmaintained, report and stop.
+3. **Forge.** If the repository is archived or deleted, report and stop.
+4. **Age gate.** If the crate is less than 18 months old, report "too young to assess" and stop.
+5. **Forecast.** Score the features with the bagged Cox ensemble.
+   Report a registry percentile and a calibrated two-year probability with a bootstrap band.
 
 ## Build from source
 
@@ -99,7 +88,7 @@ cargo build --release
 ./target/release/cargo-pulse serde
 ```
 
-With Nix (flakes), no Rust toolchain required:
+With Nix flakes, no Rust toolchain is necessary:
 
 ```sh
 nix run github:RiyaMathew-11/cargo-pulse -- serde      # run without installing
@@ -109,5 +98,4 @@ nix develop                                            # dev shell (cargo, rustc
 
 ## License
 
-Licensed under the GNU Affero General Public License v3.0 or later
-([AGPL-3.0-or-later](LICENSE)).
+GNU Affero General Public License v3.0 or later ([AGPL-3.0-or-later](LICENSE)).
